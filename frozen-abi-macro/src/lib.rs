@@ -277,7 +277,9 @@ pub fn derive_abi_enum_visitor(item: TokenStream) -> TokenStream {
 fn quote_for_test(
     test_mod_ident: &Ident,
     type_name: &Ident,
-    expected_digest: &str,
+    expected_api_digest: &str,
+    expected_abi_digest: &str,
+    field_names: &[&syn::Ident],
 ) -> TokenStream2 {
     quote! {
         #[cfg(test)]
@@ -287,25 +289,41 @@ fn quote_for_test(
 
             #[test]
             fn test_abi_digest() {
-                let mut digester = ::solana_frozen_abi::abi_digester::AbiDigester::create();
                 let example = <#type_name>::example();
-                let result = <_>::visit_for_abi(&&example, &mut digester);
-                let mut hash = digester.finalize();
+
+                /* ABI - depends on in-memory layout */
+                let mut abi_digester = ::solana_frozen_abi::abi_digester::AbiDigester::create();
+
+                abi_digester.update_with_string(format!(
+                    "size={} align={} offsets={:?}",
+                    ::std::mem::size_of::<#type_name>(),
+                    ::std::mem::align_of::<#type_name>(),
+                    [#(::memoffset::offset_of!(#type_name, #field_names)),*]
+                ));
+                let abi_actual_digest = ::std::format!("{}", abi_digester.finalize());
+
+                assert_eq!(#expected_abi_digest, abi_actual_digest, "ABI layout changed");
+
+                /* API - depends on serialized api structure*/
+                let mut api_digester = ::solana_frozen_abi::abi_digester::AbiDigester::create();
+                let result = <_>::visit_for_abi(&&example, &mut api_digester);
+                let mut hash = api_digester.finalize();
                 if result.is_err() {
                     ::std::eprintln!("Error: digest error: {:#?}", result);
                 }
                 result.unwrap();
-                let actual_digest = ::std::format!("{}", hash);
+
+                let api_actual_digest = ::std::format!("{}", hash);
                 if ::std::env::var("SOLANA_ABI_BULK_UPDATE").is_ok() {
-                    if #expected_digest != actual_digest {
-                        ::std::eprintln!("sed -i -e 's/{}/{}/g' $(git grep --files-with-matches frozen_abi)", #expected_digest, hash);
+                    if #expected_api_digest != api_actual_digest {
+                        ::std::eprintln!("sed -i -e 's/{}/{}/g' $(git grep --files-with-matches frozen_abi)", #expected_api_digest, hash);
                     }
                     ::std::eprintln!("Warning: Not testing the abi digest under SOLANA_ABI_BULK_UPDATE!");
                 } else {
                     if let Ok(dir) = ::std::env::var("SOLANA_ABI_DUMP_DIR") {
-                        assert_eq!(#expected_digest, actual_digest, "Possibly ABI changed? Examine the diff in SOLANA_ABI_DUMP_DIR!: \n$ diff -u {}/*{}* {}/*{}*", dir, #expected_digest, dir, actual_digest);
+                        assert_eq!(#expected_api_digest, api_actual_digest, "Possibly ABI changed? Examine the diff in SOLANA_ABI_DUMP_DIR!: \n$ diff -u {}/*{}* {}/*{}*", dir, #expected_api_digest, dir, api_actual_digest);
                     } else {
-                        assert_eq!(#expected_digest, actual_digest, "Possibly ABI changed? Confirm the diff by rerunning before and after this test failed with SOLANA_ABI_DUMP_DIR!");
+                        assert_eq!(#expected_api_digest, api_actual_digest, "Possibly ABI changed? Confirm the diff by rerunning before and after this test failed with SOLANA_ABI_DUMP_DIR!");
                     }
                 }
             }
@@ -319,9 +337,19 @@ fn test_mod_name(type_name: &Ident) -> Ident {
 }
 
 #[cfg(feature = "frozen-abi")]
-fn frozen_abi_type_alias(input: ItemType, expected_digest: &str) -> TokenStream {
+fn frozen_abi_type_alias(
+    input: ItemType,
+    expected_api_digest: &str,
+    expected_abi_digest: &str,
+) -> TokenStream {
     let type_name = &input.ident;
-    let test = quote_for_test(&test_mod_name(type_name), type_name, expected_digest);
+    let test = quote_for_test(
+        &test_mod_name(type_name),
+        type_name,
+        expected_api_digest,
+        expected_abi_digest,
+        &[] as &[&syn::Ident], // field names not present
+    );
     let result = quote! {
         #input
         #test
@@ -330,9 +358,29 @@ fn frozen_abi_type_alias(input: ItemType, expected_digest: &str) -> TokenStream 
 }
 
 #[cfg(feature = "frozen-abi")]
-fn frozen_abi_struct_type(input: ItemStruct, expected_digest: &str) -> TokenStream {
+fn frozen_abi_struct_type(
+    input: ItemStruct,
+    expected_api_digest: &str,
+    expected_abi_digest: &str,
+) -> TokenStream {
     let type_name = &input.ident;
-    let test = quote_for_test(&test_mod_name(type_name), type_name, expected_digest);
+
+    let field_names: Vec<&syn::Ident> = match &input.fields {
+        syn::Fields::Named(fields_named) => fields_named
+            .named
+            .iter()
+            .map(|f| f.ident.as_ref().unwrap())
+            .collect(),
+        syn::Fields::Unnamed(_) | syn::Fields::Unit => Vec::new(),
+    };
+
+    let test = quote_for_test(
+        &test_mod_name(type_name),
+        type_name,
+        expected_api_digest,
+        expected_abi_digest,
+        &field_names,
+    );
     let result = quote! {
         #input
         #test
@@ -387,9 +435,19 @@ fn quote_sample_variant(
 }
 
 #[cfg(feature = "frozen-abi")]
-fn frozen_abi_enum_type(input: ItemEnum, expected_digest: &str) -> TokenStream {
+fn frozen_abi_enum_type(
+    input: ItemEnum,
+    expected_api_digest: &str,
+    expected_abi_digest: &str,
+) -> TokenStream {
     let type_name = &input.ident;
-    let test = quote_for_test(&test_mod_name(type_name), type_name, expected_digest);
+    let test = quote_for_test(
+        &test_mod_name(type_name),
+        type_name,
+        expected_api_digest,
+        expected_abi_digest,
+        &[] as &[&syn::Ident], // field names not present
+    );
     let result = quote! {
         #input
         #test
@@ -400,10 +458,15 @@ fn frozen_abi_enum_type(input: ItemEnum, expected_digest: &str) -> TokenStream {
 #[cfg(feature = "frozen-abi")]
 #[proc_macro_attribute]
 pub fn frozen_abi(attrs: TokenStream, item: TokenStream) -> TokenStream {
-    let mut expected_digest: Option<String> = None;
+    let mut api_expected_digest: Option<String> = None;
+    let mut abi_expected_digest: Option<String> = None;
+
     let attrs_parser = syn::meta::parser(|meta| {
-        if meta.path.is_ident("digest") {
-            expected_digest = Some(meta.value()?.parse::<LitStr>()?.value());
+        if meta.path.is_ident("api_digest") {
+            api_expected_digest = Some(meta.value()?.parse::<LitStr>()?.value());
+            Ok(())
+        } else if meta.path.is_ident("abi_digest") {
+            abi_expected_digest = Some(meta.value()?.parse::<LitStr>()?.value());
             Ok(())
         } else {
             Err(meta.error("unsupported \"frozen_abi\" property"))
@@ -411,10 +474,18 @@ pub fn frozen_abi(attrs: TokenStream, item: TokenStream) -> TokenStream {
     });
     parse_macro_input!(attrs with attrs_parser);
 
-    let Some(expected_digest) = expected_digest else {
+    let Some(api_digest) = api_expected_digest else {
         return Error::new_spanned(
             TokenStream2::from(item),
-            "the required \"digest\" = ... attribute is missing.",
+            "the required \"api_digest\" = ... attribute is missing.",
+        )
+        .to_compile_error()
+        .into();
+    };
+    let Some(abi_digest) = abi_expected_digest else {
+        return Error::new_spanned(
+            TokenStream2::from(item),
+            "the required \"abi_digest\" = ... attribute is missing.",
         )
         .to_compile_error()
         .into();
@@ -422,9 +493,9 @@ pub fn frozen_abi(attrs: TokenStream, item: TokenStream) -> TokenStream {
 
     let item = parse_macro_input!(item as Item);
     match item {
-        Item::Struct(input) => frozen_abi_struct_type(input, &expected_digest),
-        Item::Enum(input) => frozen_abi_enum_type(input, &expected_digest),
-        Item::Type(input) => frozen_abi_type_alias(input, &expected_digest),
+        Item::Struct(input) => frozen_abi_struct_type(input, &api_digest, &abi_digest),
+        Item::Enum(input) => frozen_abi_enum_type(input, &api_digest, &abi_digest),
+        Item::Type(input) => frozen_abi_type_alias(input, &api_digest, &abi_digest),
         _ => Error::new_spanned(
             item,
             "frozen_abi isn't applicable; only for struct, enum and type",
