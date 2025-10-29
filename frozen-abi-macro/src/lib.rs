@@ -141,7 +141,7 @@ fn derive_abi_sample_enum_type(input: ItemEnum) -> TokenStream {
         #[automatically_derived]
         #( #attrs )*
         impl #impl_generics ::solana_frozen_abi::abi_example::AbiExample for #type_name #ty_generics #where_clause {
-            fn example() -> Self {
+            fn example(rng: Option<&mut impl ::rand::RngCore>) -> Self {
                 ::std::println!(
                     "AbiExample for enum: {}",
                     std::any::type_name::<#type_name #ty_generics>()
@@ -164,7 +164,7 @@ fn derive_abi_sample_struct_type(input: ItemStruct) -> TokenStream {
             for field in fields {
                 let field_name = &field.ident;
                 sample_fields.extend(quote! {
-                    #field_name: AbiExample::example(),
+                    #field_name: AbiExample::example(rng.as_mut()),
                 });
             }
             sample_fields = quote! {
@@ -174,7 +174,7 @@ fn derive_abi_sample_struct_type(input: ItemStruct) -> TokenStream {
         Fields::Unnamed(_) => {
             for _ in fields {
                 sample_fields.extend(quote! {
-                    AbiExample::example(),
+                    AbiExample::example(rng.as_mut()),
                 });
             }
             sample_fields = quote! {
@@ -193,7 +193,7 @@ fn derive_abi_sample_struct_type(input: ItemStruct) -> TokenStream {
         #[automatically_derived]
         #( #attrs )*
         impl #impl_generics ::solana_frozen_abi::abi_example::AbiExample for #type_name #ty_generics #where_clause {
-            fn example() -> Self {
+            fn example(rng: Option<&mut impl ::rand::RngCore>) -> Self {
                 ::std::println!(
                     "AbiExample for struct: {}",
                     std::any::type_name::<#type_name #ty_generics>()
@@ -279,30 +279,19 @@ fn quote_for_test(
     type_name: &Ident,
     expected_api_digest: &str,
     expected_abi_digest: &str,
-    field_names: &[&syn::Ident],
 ) -> TokenStream2 {
     quote! {
         #[cfg(test)]
         mod #test_mod_ident {
             use super::*;
             use ::solana_frozen_abi::abi_example::{AbiExample, AbiEnumVisitor};
+            use ::rand_chacha::ChaCha8Rng;
+            use ::rand::{SeedableRng, RngCore};
+            use ::bincode;
 
             #[test]
             fn test_abi_digest() {
-                let example = <#type_name>::example();
-
-                /* ABI - depends on in-memory layout */
-                let mut abi_digester = ::solana_frozen_abi::abi_digester::AbiDigester::create();
-
-                abi_digester.update_with_string(format!(
-                    "size={} align={} offsets={:?}",
-                    ::std::mem::size_of::<#type_name>(),
-                    ::std::mem::align_of::<#type_name>(),
-                    [#(::memoffset::offset_of!(#type_name, #field_names)),*]
-                ));
-                let abi_actual_digest = ::std::format!("{}", abi_digester.finalize());
-
-                assert_eq!(#expected_abi_digest, abi_actual_digest, "ABI layout changed");
+                let example = <#type_name>::example(None);
 
                 /* API - depends on serialized api structure*/
                 let mut api_digester = ::solana_frozen_abi::abi_digester::AbiDigester::create();
@@ -321,12 +310,25 @@ fn quote_for_test(
                     ::std::eprintln!("Warning: Not testing the abi digest under SOLANA_ABI_BULK_UPDATE!");
                 } else {
                     if let Ok(dir) = ::std::env::var("SOLANA_ABI_DUMP_DIR") {
-                        assert_eq!(#expected_api_digest, api_actual_digest, "Possibly ABI changed? Examine the diff in SOLANA_ABI_DUMP_DIR!: \n$ diff -u {}/*{}* {}/*{}*", dir, #expected_api_digest, dir, api_actual_digest);
+                        assert_eq!(#expected_api_digest, api_actual_digest, "API layout changed; Examine the diff in SOLANA_ABI_DUMP_DIR!: \n$ diff -u {}/*{}* {}/*{}*", dir, #expected_api_digest, dir, api_actual_digest);
                     } else {
-                        assert_eq!(#expected_api_digest, api_actual_digest, "Possibly ABI changed? Confirm the diff by rerunning before and after this test failed with SOLANA_ABI_DUMP_DIR!");
+                        assert_eq!(#expected_api_digest, api_actual_digest, "API layout changed; Confirm the diff by rerunning before and after this test failed with SOLANA_ABI_DUMP_DIR!");
                     }
                 }
+
+                /* ABI - depends on serialized binary layout */
+                let mut rng = ChaCha8Rng::seed_from_u64(20666175621446498);
+                let mut abi_digester = ::solana_frozen_abi::abi_digester::AbiDigester::create();
+
+                for _ in 0..1000 {
+                    let sample = <#type_name>::example(Some(&mut rng));
+                    let bytes = bincode::serialize(&sample).unwrap();
+                    abi_digester.update(&bytes);
+                }
+                let abi_actual_digest = ::std::format!("{}", abi_digester.finalize());
+                assert_eq!(#expected_abi_digest, abi_actual_digest, "ABI layout changed");
             }
+
         }
     }
 }
@@ -348,7 +350,6 @@ fn frozen_abi_type_alias(
         type_name,
         expected_api_digest,
         expected_abi_digest,
-        &[] as &[&syn::Ident], // field names not present
     );
     let result = quote! {
         #input
@@ -364,22 +365,11 @@ fn frozen_abi_struct_type(
     expected_abi_digest: &str,
 ) -> TokenStream {
     let type_name = &input.ident;
-
-    let field_names: Vec<&syn::Ident> = match &input.fields {
-        syn::Fields::Named(fields_named) => fields_named
-            .named
-            .iter()
-            .map(|f| f.ident.as_ref().unwrap())
-            .collect(),
-        syn::Fields::Unnamed(_) | syn::Fields::Unit => Vec::new(),
-    };
-
     let test = quote_for_test(
         &test_mod_name(type_name),
         type_name,
         expected_api_digest,
         expected_abi_digest,
-        &field_names,
     );
     let result = quote! {
         #input
@@ -446,7 +436,6 @@ fn frozen_abi_enum_type(
         type_name,
         expected_api_digest,
         expected_abi_digest,
-        &[] as &[&syn::Ident], // field names not present
     );
     let result = quote! {
         #input
