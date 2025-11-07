@@ -1,5 +1,6 @@
 use {
     crate::abi_digester::{AbiDigester, DigestError, DigestResult},
+    rand::{distributions::Standard, Rng, RngCore},
     serde::Serialize,
     std::any::type_name,
 };
@@ -8,22 +9,30 @@ use {
 // object graph to generate the abi digest. The frozen abi test harness calls T::example() to
 // instantiate the tested root type and traverses its fields recursively, abusing the
 // serde::serialize().
-//
+
 // This trait applicability is similar to the Default trait. That means all referenced types must
 // implement this trait. AbiExample is implemented for almost all common types in this file.
-//
+
 // When implementing AbiExample manually, you need to return a _minimally-populated_ value
 // from it to actually generate a meaningful digest. This impl semantics is unlike Default, which
 // usually returns something empty. See actual impls for inspiration.
-//
+
 // The requirement of AbiExample impls even applies to those types of `#[serde(skip)]`-ed fields.
 // That's because the abi digesting needs a properly initialized object to enter into the
 // serde::serialize() to begin with, even knowing they aren't used for serialization and thus abi
 // digest. Luckily, `#[serde(skip)]`-ed fields' AbiExample impls can just delegate to T::default(),
 // exploiting the nature of this artificial impl requirement as an exception from the usual
 // AbiExample semantics.
+
 pub trait AbiExample: Sized {
     fn example() -> Self;
+
+    fn random(rng: &mut impl RngCore) -> Self
+    where
+        Standard: rand::distributions::Distribution<Self>,
+    {
+        rng.gen::<Self>()
+    }
 }
 
 // Following code snippets are copied and adapted from the official rustc implementation to
@@ -254,6 +263,13 @@ type Placeholder = ();
 impl<T: Sized> AbiExample for T {
     default fn example() -> Self {
         <Placeholder>::type_erased_example()
+    }
+
+    default fn random(rng: &mut impl RngCore) -> Self
+    where
+        Standard: rand::distributions::Distribution<Self>,
+    {
+        rng.gen::<Self>()
     }
 }
 

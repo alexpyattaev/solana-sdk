@@ -141,12 +141,15 @@ fn derive_abi_sample_enum_type(input: ItemEnum) -> TokenStream {
         #[automatically_derived]
         #( #attrs )*
         impl #impl_generics ::solana_frozen_abi::abi_example::AbiExample for #type_name #ty_generics #where_clause {
-            fn example(rng: Option<&mut impl ::rand::RngCore>) -> Self {
+            fn example() -> Self {
                 ::std::println!(
                     "AbiExample for enum: {}",
                     std::any::type_name::<#type_name #ty_generics>()
                 );
                 #sample_variant
+            }
+            fn random(_rng: &mut impl ::rand::RngCore) -> Self {
+                Self::example() // TODO: real random
             }
         }
     };
@@ -156,30 +159,39 @@ fn derive_abi_sample_enum_type(input: ItemEnum) -> TokenStream {
 #[cfg(feature = "frozen-abi")]
 fn derive_abi_sample_struct_type(input: ItemStruct) -> TokenStream {
     let type_name = &input.ident;
-    let mut sample_fields = quote! {};
     let fields = &input.fields;
+
+    let mut sample_fields = quote! {};
+    let mut random_fields = quote! {};
 
     match fields {
         Fields::Named(_) => {
             for field in fields {
                 let field_name = &field.ident;
+
                 sample_fields.extend(quote! {
-                    #field_name: AbiExample::example(rng.as_mut()),
+                    #field_name: AbiExample::example(),
+                });
+
+                random_fields.extend(quote! {
+                    #field_name: AbiExample::random(rng),
                 });
             }
-            sample_fields = quote! {
-                { #sample_fields }
-            }
+            sample_fields = quote! {{ #sample_fields }};
+            random_fields = quote! {{ #random_fields }};
         }
         Fields::Unnamed(_) => {
             for _ in fields {
                 sample_fields.extend(quote! {
-                    AbiExample::example(rng.as_mut()),
+                    AbiExample::example(),
+                });
+
+                random_fields.extend(quote! {
+                    AbiExample::random(rng),
                 });
             }
-            sample_fields = quote! {
-                ( #sample_fields )
-            }
+            sample_fields = quote! {( #sample_fields )};
+            random_fields = quote! {( #random_fields )};
         }
         _ => unimplemented!("fields: {:?}", fields),
     }
@@ -193,14 +205,24 @@ fn derive_abi_sample_struct_type(input: ItemStruct) -> TokenStream {
         #[automatically_derived]
         #( #attrs )*
         impl #impl_generics ::solana_frozen_abi::abi_example::AbiExample for #type_name #ty_generics #where_clause {
-            fn example(rng: Option<&mut impl ::rand::RngCore>) -> Self {
+            fn example() -> Self {
                 ::std::println!(
-                    "AbiExample for struct: {}",
+                    "AbiExample::example for struct: {}",
                     std::any::type_name::<#type_name #ty_generics>()
                 );
                 use ::solana_frozen_abi::abi_example::AbiExample;
 
                 #type_name #turbofish #sample_fields
+            }
+
+            fn random(rng: &mut impl ::rand::RngCore) -> Self {
+                ::std::println!(
+                    "AbiExample::random for struct: {}",
+                    std::any::type_name::<#type_name #ty_generics>()
+                );
+                use ::solana_frozen_abi::abi_example::AbiExample;
+
+                #type_name #turbofish #random_fields
             }
         }
     };
@@ -288,45 +310,44 @@ fn quote_for_test(
             use ::rand_chacha::ChaCha8Rng;
             use ::rand::{SeedableRng, RngCore};
             use ::bincode;
+            use ::solana_frozen_abi::hash::{Hash, Hasher};
 
-            #[test]
-            fn test_abi_digest() {
-                let example = <#type_name>::example(None);
-
-                /* API - depends on serialized api structure*/
-                let mut api_digester = ::solana_frozen_abi::abi_digester::AbiDigester::create();
-                let result = <_>::visit_for_abi(&&example, &mut api_digester);
-                let mut hash = api_digester.finalize();
+           #[test]
+            fn test_api_digest() {
+                let mut digester = ::solana_frozen_abi::abi_digester::AbiDigester::create();
+                let example = <#type_name>::example();
+                let result = <_>::visit_for_abi(&&example, &mut digester);
+                let mut hash = digester.finalize();
                 if result.is_err() {
                     ::std::eprintln!("Error: digest error: {:#?}", result);
                 }
                 result.unwrap();
-
-                let api_actual_digest = ::std::format!("{}", hash);
+                let actual_digest = ::std::format!("{}", hash);
                 if ::std::env::var("SOLANA_ABI_BULK_UPDATE").is_ok() {
-                    if #expected_api_digest != api_actual_digest {
+                    if #expected_api_digest != actual_digest {
                         ::std::eprintln!("sed -i -e 's/{}/{}/g' $(git grep --files-with-matches frozen_abi)", #expected_api_digest, hash);
                     }
                     ::std::eprintln!("Warning: Not testing the abi digest under SOLANA_ABI_BULK_UPDATE!");
                 } else {
                     if let Ok(dir) = ::std::env::var("SOLANA_ABI_DUMP_DIR") {
-                        assert_eq!(#expected_api_digest, api_actual_digest, "API layout changed; Examine the diff in SOLANA_ABI_DUMP_DIR!: \n$ diff -u {}/*{}* {}/*{}*", dir, #expected_api_digest, dir, api_actual_digest);
+                        assert_eq!(#expected_api_digest, actual_digest, "Possibly API changed? Examine the diff in SOLANA_ABI_DUMP_DIR!: \n$ diff -u {}/*{}* {}/*{}*", dir, #expected_api_digest, dir, actual_digest);
                     } else {
-                        assert_eq!(#expected_api_digest, api_actual_digest, "API layout changed; Confirm the diff by rerunning before and after this test failed with SOLANA_ABI_DUMP_DIR!");
+                        assert_eq!(#expected_api_digest, actual_digest, "Possibly API changed? Confirm the diff by rerunning before and after this test failed with SOLANA_ABI_DUMP_DIR!");
                     }
                 }
+            }
 
-                /* ABI - depends on serialized binary layout */
+            #[test]
+            fn test_abi_digest() {
                 let mut rng = ChaCha8Rng::seed_from_u64(20666175621446498);
-                let mut abi_digester = ::solana_frozen_abi::abi_digester::AbiDigester::create();
+                let mut digester = ::solana_frozen_abi::hash::Hasher::default();
 
-                for _ in 0..1000 {
-                    let sample = <#type_name>::example(Some(&mut rng));
-                    let bytes = bincode::serialize(&sample).unwrap();
-                    abi_digester.update(&bytes);
+                for _ in 0..10000000 {
+                    let sample = <#type_name>::random(&mut rng);
+                    digester.hash(&bincode::serialize(&sample).unwrap());
                 }
-                let abi_actual_digest = ::std::format!("{}", abi_digester.finalize());
-                assert_eq!(#expected_abi_digest, abi_actual_digest, "ABI layout changed");
+                let actual_digest = ::std::format!("{}", digester.result());
+                assert_eq!(#expected_abi_digest, actual_digest, "ABI layout changed");
             }
 
         }

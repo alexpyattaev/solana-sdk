@@ -10,7 +10,7 @@ pub mod abi_digester;
 #[cfg(feature = "frozen-abi")]
 pub mod abi_example;
 #[cfg(feature = "frozen-abi")]
-mod hash;
+pub mod hash;
 
 #[cfg(feature = "frozen-abi")]
 #[macro_use]
