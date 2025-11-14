@@ -258,48 +258,6 @@ pub(crate) fn normalize_type_name(type_name: &str) -> String {
     type_name.chars().filter(|c| *c != '&').collect()
 }
 
-type Placeholder = ();
-
-impl<T: Sized> AbiExample for T {
-    default fn example() -> Self {
-        <Placeholder>::type_erased_example()
-    }
-
-    default fn random(rng: &mut impl RngCore) -> Self
-    where
-        Standard: rand::distributions::Distribution<Self>,
-    {
-        rng.gen::<Self>()
-    }
-}
-
-// this works like a type erasure and a hatch to escape type error to runtime error
-trait TypeErasedExample<T> {
-    fn type_erased_example() -> T;
-}
-
-impl<T: Sized> TypeErasedExample<T> for Placeholder {
-    default fn type_erased_example() -> T {
-        panic!(
-            "derive or implement AbiExample/AbiEnumVisitor for {}",
-            type_name::<T>()
-        );
-    }
-}
-
-impl<T: Default + Serialize> TypeErasedExample<T> for Placeholder {
-    default fn type_erased_example() -> T {
-        let original_type_name = type_name::<T>();
-        let normalized_type_name = normalize_type_name(original_type_name);
-
-        if normalized_type_name.starts_with("solana") {
-            panic!("derive or implement AbiExample/AbiEnumVisitor for {original_type_name}");
-        } else {
-            panic!("new unrecognized type for ABI digest!: {original_type_name}")
-        }
-    }
-}
-
 impl<T: AbiExample> AbiExample for Option<T> {
     fn example() -> Self {
         println!("AbiExample for (Option<T>): {}", type_name::<Self>());
@@ -558,70 +516,6 @@ impl<T: Serialize + AbiExample> AbiEnumVisitor for T {
         T::example()
             .serialize(digester.create_new())
             .map_err(DigestError::wrap_by_type::<T>)
-    }
-}
-
-// even (experimental) rust specialization isn't enough for us, resort to
-// the autoref hack: https://github.com/dtolnay/case-studies/blob/master/autoref-specialization/README.md
-// relevant test: TestVecEnum
-impl<T: Serialize + ?Sized + AbiEnumVisitor> AbiEnumVisitor for &T {
-    default fn visit_for_abi(&self, digester: &mut AbiDigester) -> DigestResult {
-        println!("AbiEnumVisitor for &T: {}", type_name::<T>());
-        // Don't call self.visit_for_abi(...) to avoid the infinite recursion!
-        T::visit_for_abi(self, digester)
-    }
-}
-
-// force to call self.serialize instead of T::visit_for_abi() for serialization
-// helper structs like ad-hoc iterator `struct`s
-impl<T: Serialize + TransparentAsHelper> AbiEnumVisitor for &T {
-    default fn visit_for_abi(&self, digester: &mut AbiDigester) -> DigestResult {
-        println!(
-            "AbiEnumVisitor for (TransparentAsHelper): {}",
-            type_name::<T>()
-        );
-        self.serialize(digester.create_new())
-            .map_err(DigestError::wrap_by_type::<T>)
-    }
-}
-
-// force to call self.serialize instead of T::visit_for_abi() to work around the
-// inability of implementing AbiExample for private structs from other crates
-impl<T: Serialize + TransparentAsHelper + EvenAsOpaque> AbiEnumVisitor for &T {
-    default fn visit_for_abi(&self, digester: &mut AbiDigester) -> DigestResult {
-        let type_name = type_name::<T>();
-        let matcher = T::TYPE_NAME_MATCHER;
-        println!("AbiEnumVisitor for (EvenAsOpaque): {type_name}: matcher: {matcher}");
-        self.serialize(digester.create_new_opaque(matcher))
-            .map_err(DigestError::wrap_by_type::<T>)
-    }
-}
-
-// Because Option and Result enums are so common enums, provide generic trait implementations
-// The digesting pattern must match with what is derived from #[derive(AbiEnumVisitor)]
-impl<T: AbiEnumVisitor> AbiEnumVisitor for Option<T> {
-    fn visit_for_abi(&self, digester: &mut AbiDigester) -> DigestResult {
-        println!("AbiEnumVisitor for (Option<T>): {}", type_name::<Self>());
-
-        let variant: Self = Option::Some(T::example());
-        // serde calls serialize_some(); not serialize_variant();
-        // so create_new is correct, not create_enum_child or create_enum_new
-        variant.serialize(digester.create_new())
-    }
-}
-
-impl<O: AbiEnumVisitor, E: AbiEnumVisitor> AbiEnumVisitor for Result<O, E> {
-    fn visit_for_abi(&self, digester: &mut AbiDigester) -> DigestResult {
-        println!("AbiEnumVisitor for (Result<O, E>): {}", type_name::<Self>());
-
-        digester.update(&["enum Result (variants = 2)"]);
-        let variant: Self = Result::Ok(O::example());
-        variant.serialize(digester.create_enum_child()?)?;
-
-        let variant: Self = Result::Err(E::example());
-        variant.serialize(digester.create_enum_child()?)?;
-
-        digester.create_child()
     }
 }
 

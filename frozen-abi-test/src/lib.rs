@@ -6,12 +6,12 @@ use solana_frozen_abi_macro::AbiExample;
 
 #[cfg_attr(
     feature = "frozen-abi",
-    // derive(AbiExample),
+    //derive(AbiExample),
     // derive(AbiEnumVisitor),
-    frozen_abi(
+    /*frozen_abi(
         api_digest = "fFcqrZWZX4WcorTUxfMCVWeh2QcwamXKdLTzsDj58Kn",
         abi_digest = "5RoDSUMyqu38JmXiZBKXzAGRuku7JfHtKamyGqnYN7ND"
-    )
+    )*/
 )]
 #[derive(Serialize, Deserialize)]
 pub struct BlockhashQueue {
